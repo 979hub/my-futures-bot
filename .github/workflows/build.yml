@@ -1,0 +1,28 @@
+name: Build Bot Image
+on:
+  push:
+    branches: [ "main" ] # 每次你点击保存/提交，就会自动开始构建
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          # 镜像名字会是 ghcr.io/你的用户名/my-futures-bot:latest
+          tags: ghcr.io/${{ github.repository_owner }}/my-futures-bot:latest
