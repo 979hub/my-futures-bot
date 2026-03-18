@@ -5,80 +5,75 @@ import uvicorn
 
 app = FastAPI()
 
-# 初始化币安合约 Demo 环境
+# 1. 初始化币安合约
+# 注意：不要再调用 set_sandbox_mode(True)
 exchange = ccxt.binance({
     'apiKey': os.getenv('BINANCE_API_KEY'),
     'secret': os.getenv('BINANCE_API_SECRET'),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'future'  # 指定为合约
+        'defaultType': 'future', # 默认合约模式
     }
 })
 
-# 强制指向 Demo 交易地址 (https://demo-fapi.binance.com)
+# 2. 强制指向新的 Demo Trading 接口地址
+# 覆盖 CCXT 默认的合约 API 路径
 exchange.urls['api']['fapiPublic'] = 'https://demo-fapi.binance.com/fapi/v1'
 exchange.urls['api']['fapiPrivate'] = 'https://demo-fapi.binance.com/fapi/v1'
 
-# 也可以使用 ccxt 的内置 sandbox 模式，它通常会自动处理地址
-# 但明确指定上面两个 URL 是最稳妥的
-exchange.set_sandbox_mode(True) 
-
 @app.post("/webhook")
 async def webhook(request: Request):
-    # 1. 解析 JSON
     try:
         data = await request.json()
     except Exception:
         return {"status": "error", "msg": "Invalid JSON"}
 
-    # 2. 安全校验 (暗号)
+    # 安全校验
     passphrase = os.getenv('WEBHOOK_PASSPHRASE')
     if passphrase and data.get('passphrase') != passphrase:
         return {"status": "error", "msg": "Auth failed"}
     
-    # 3. 提取字段
     try:
-        symbol = data.get('ticker', '').upper().replace(".P", "") # 兼容 TV 格式
+        # 清理 ticker (例如把 BTCUSDT.P 变成 BTC/USDT)
+        symbol = data.get('ticker', '').upper().replace(".P", "")
+        # 如果 symbol 不包含斜杠，CCXT 会自动处理 BTCUSDT，但建议加上
+        if "/" not in symbol and "USDT" in symbol:
+            symbol = symbol.replace("USDT", "/USDT")
+
         action = str(data.get('action', '')).lower()
         side = str(data.get('order_side', 'buy')).lower()
         amount = float(data.get('quantity', 0))
         
-        if amount <= 0:
-            return {"status": "error", "msg": "Quantity must > 0"}
-
         params = {}
         # 只减仓逻辑
         if 'exit' in action or 'close' in action:
             params['reduceOnly'] = True
             
-        print(f"正在向 DEMO 环境下单: {symbol} {side} {amount}")
+        print(f"执行 Demo 交易: {symbol} {side} {amount} | Params: {params}")
 
-        # 4. 执行下单操作
+        # 下单
         if side == 'buy':
             order = exchange.create_market_buy_order(symbol, amount, params)
         else:
             order = exchange.create_market_sell_order(symbol, amount, params)
             
-        print(f"成功: {symbol} 下单成功 ID: {order['id']}")
+        print(f"下单成功: {order['id']}")
         return {"status": "success", "order_id": order['id']}
 
-    # --- 精细化 API 错误识别 ---
-    except ccxt.InsufficientFunds as e:
-        error_msg = f"余额不足 (Demo): {str(e)}"
-    except ccxt.AuthenticationError as e:
-        error_msg = f"API 密钥错误: 请检查 Demo 交易的 Key/Secret 是否正确"
+    # --- 详细的 API 错误捕获 ---
+    except ccxt.AuthenticationError:
+        error_msg = "API Key 错误：请确保使用的是 Demo Trading 的 Key"
+    except ccxt.InsufficientFunds:
+        error_msg = "Demo 账户余额不足"
     except ccxt.InvalidOrder as e:
-        error_msg = f"订单参数错误 (如最小下单量不足): {str(e)}"
-    except ccxt.NetworkError as e:
-        error_msg = f"网络请求失败 (无法连接到 demo-fapi): {str(e)}"
-    except ccxt.ExchangeError as e:
-        error_msg = f"交易所逻辑错误: {str(e)}"
+        error_msg = f"订单无效: {str(e)} (检查数量是否符合最小值要求)"
+    except ccxt.NetworkError:
+        error_msg = "网络请求失败，请检查服务器是否能访问 demo-fapi.binance.com"
     except Exception as e:
-        error_msg = f"其他错误: {str(e)}"
+        error_msg = f"发生错误: {str(e)}"
 
-    print(f"报错详情: {error_msg}")
+    print(f"操作失败: {error_msg}")
     return {"status": "error", "msg": error_msg}
 
 if __name__ == "__main__":
-    # 生产环境建议端口 8080，如果用 80 端口确保有 root/管理员权限
     uvicorn.run(app, host="0.0.0.0", port=80)
