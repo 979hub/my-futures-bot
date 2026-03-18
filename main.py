@@ -1,64 +1,53 @@
 from fastapi import FastAPI, Request
-import ccxt
-import os
-import uvicorn
+import ccxt, os, uvicorn
 
 app = FastAPI()
 
-# --- 核心修改：手动指定 demo-fapi 地址 ---
+# 获取环境变量
+API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
+API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
+PASSPHRASE = os.getenv('WEBHOOK_PASSPHRASE', '').strip()
+
+# 初始化交易所 - 我们这次尝试最标准的方法
 exchange = ccxt.binance({
-    'apiKey': os.getenv('BINANCE_API_KEY'),
-    'secret': os.getenv('BINANCE_API_SECRET'),
+    'apiKey': API_KEY,
+    'secret': API_SECRET,
     'enableRateLimit': True,
-    # 强制覆盖 API 地址为币安最新的 Demo Trading 地址
-    'urls': {
-        'api': {
-            'fapiPublic': 'https://demo-fapi.binance.com/fapi/v1',
-            'fapiPrivate': 'https://demo-fapi.binance.com/fapi/v1',
-        },
-    },
-    'options': {
-        'defaultType': 'future'
-    }
+    'options': {'defaultType': 'future'}
 })
 
-# 注意：这里不再使用 set_sandbox_mode(True)，因为地址已经在上面手动指定了
-
-PASSPHRASE = os.getenv('WEBHOOK_PASSPHRASE')
+# --- 关键：手动指定 Demo 交易地址 ---
+exchange.urls['api']['fapiPublic'] = 'https://demo-fapi.binance.com/fapi/v1'
+exchange.urls['api']['fapiPrivate'] = 'https://demo-fapi.binance.com/fapi/v1'
 
 @app.get("/")
-def home():
-    return {"status": "Bot is online!", "mode": "Binance Demo Trading"}
+def debug_info():
+    # 这里的目的是让你在浏览器就能看到机器人读到的 Key 是否正确（隐藏中间部分）
+    masked_key = f"{API_KEY[:5]}****{API_KEY[-5:]}" if len(API_KEY) > 10 else "未读取到Key"
+    return {
+        "status": "Online",
+        "read_api_key_prefix": masked_key,
+        "endpoint": "https://demo-fapi.binance.com",
+        "tip": "如果Key前5位不对，说明环境变量没填对或没生效"
+    }
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    try:
-        data = await request.json()
-    except:
-        return {"status": "error", "msg": "Invalid JSON"}
-
+    data = await request.json()
     if data.get('passphrase') != PASSPHRASE:
         return {"status": "error", "msg": "Auth failed"}
     
     try:
         symbol = data.get('ticker').upper()
-        action = str(data.get('action', '')).lower()
-        side = str(data.get('order_side', 'buy')).lower()
+        side = data.get('order_side', 'buy').lower()
         amount = float(data.get('quantity'))
         
-        params = {}
-        if 'exit' in action or 'close' in action:
-            params['reduceOnly'] = True
-            
-        if side == 'buy':
-            order = exchange.create_market_buy_order(symbol, amount, params)
-        else:
-            order = exchange.create_market_sell_order(symbol, amount, params)
-            
-        print(f"成功下单: {symbol} | {side}")
+        # 下单测试
+        order = exchange.create_market_buy_order(symbol, amount) if side == 'buy' else exchange.create_market_sell_order(symbol, amount)
         return {"status": "success", "order_id": order['id']}
     except Exception as e:
-        print(f"下单报错: {str(e)}")
+        # 打印详细报错到日志
+        print(f"DEBUG Error: {str(e)}")
         return {"status": "error", "msg": str(e)}
 
 if __name__ == "__main__":
