@@ -1,68 +1,51 @@
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse
-import hmac, hashlib, time, os, httpx, uvicorn
+from fastapi import FastAPI, Request
+import ccxt, os, uvicorn
 
 app = FastAPI()
 
-# 模拟你 JS 里的 Nginx 伪装页面
-NGINX_404 = "<h1>404 Not Found</h1><hr><p>nginx</p>"
+# 初始化币安合约测试网
+exchange = ccxt.binance({
+    'apiKey': os.getenv('BINANCE_API_KEY'),
+    'secret': os.getenv('BINANCE_API_SECRET'),
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
+exchange.set_sandbox_mode(True)
 
-# 币安签名算法 (对应你的 generateSignature)
-def generate_signature(query_string, secret):
-    return hmac.new(secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
-
-@app.api_route("/{path:path}", methods=["GET", "POST"])
-async def catch_all(request: Request, path: str):
-    # 1. 伪装逻辑：非 POST 请求直接报 Nginx 404
-    if request.method != "POST":
-        return HTMLResponse(content=NGINX_404, status_code=404)
-
+@app.post("/webhook")
+async def webhook(request: Request):
     try:
         data = await request.json()
+    except:
+        return {"status": "error", "msg": "Invalid JSON"}
+
+    # 暗号校验
+    if data.get('passphrase') != os.getenv('WEBHOOK_PASSPHRASE'):
+        return {"status": "error", "msg": "Auth failed"}
+    
+    try:
+        symbol = data.get('ticker').upper()
+        # action 用于判断是否为平仓 (如 SELLEXIT)
+        action = str(data.get('action', '')).lower()
+        # order_side 是 TV 告诉我们的物理方向 (buy/sell)
+        side = str(data.get('order_side', 'buy')).lower()
+        amount = float(data.get('quantity'))
         
-        # 从环境变量读取密钥
-        API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
-        API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
-        PASSPHRASE = os.getenv('WEBHOOK_PASSPHRASE', '').strip()
-
-        # 2. 校验暗号 (对应你 JS 的 passphrase 校验)
-        if not data.get('passphrase') or data.get('passphrase') != PASSPHRASE:
-            print("[警告] 拦截到非法请求。")
-            return Response(content="Not Found", status_code=404)
-
-        # 3. 核心清洗逻辑 (完全复刻你的 JS 逻辑)
-        # 例子: "BINANCE:BTCUSDT.P" -> "BTCUSDT"
-        raw_symbol = data.get('symbol', 'BTCUSDT')
-        symbol = raw_symbol.split(':')[-1].replace("!", "").replace(".P", "").upper()
-        side = data.get('side', 'BUY').upper()
-        qty = abs(float(data.get('qty', 0)))
-        timestamp = int(time.time() * 1000)
-
-        print(f"[信号] 收到交易指令: {symbol} {side} 数量: {qty}")
-
-        # 4. 构建请求 (指向 demo-fapi 测试网)
-        query_string = f"symbol={symbol}&side={side}&type=MARKET&quantity={qty}&recvWindow=10000&timestamp={timestamp}"
-        signature = generate_signature(query_string, API_SECRET)
-        
-        # 如果要实盘，就把 demo-fapi 改成 fapi
-        binance_url = f"https://demo-fapi.binance.com/fapi/v1/order?{query_string}&signature={signature}"
-
-        # 5. 发送请求
-        async with httpx.AsyncClient() as client:
-            response = await client.post(binance_url, headers={'X-MBX-APIKEY': API_KEY})
-            res_data = response.json()
-
-        # 6. 反馈结果
-        if response.status_code == 200:
-            print(f"[成功] 币安已执行下单")
-            return res_data
+        params = {}
+        # 如果动作包含 exit 或 close，开启只减仓模式保护
+        if 'exit' in action or 'close' in action:
+            params['reduceOnly'] = True
+            
+        if side == 'buy':
+            order = exchange.create_market_buy_order(symbol, amount, params)
         else:
-            print(f"[币安返回报错] {res_data}")
-            return Response(content=str(res_data), status_code=400)
-
+            order = exchange.create_market_sell_order(symbol, amount, params)
+            
+        print(f"成功: {action} {symbol} {amount}")
+        return {"status": "success", "order_id": order['id']}
     except Exception as e:
-        print(f"运行时错误: {str(e)}")
-        return Response(content="Not Found", status_code=404)
+        print(f"报错: {str(e)}")
+        return {"status": "error", "msg": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=80)
